@@ -1,0 +1,6 @@
+{
+  "niches": ["Hip-Hop", "Pop", "Gaming", "Fitness", "Comedy", "Lifestyle"],
+  "ratePer1000Views": 1.0,
+  "minViews": 1000,
+  "currency": "$"
+}

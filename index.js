@@ -106,6 +106,10 @@ async function runSetup(guild) {
     for (const ch of section.channels) {
       const res = await ensureText(guild, ch.name, cat.id, ch.mode === READ_ONLY ? readOnly : undefined);
       if (res.created) created.push(`#${ch.name}`);
+      // Existing channels (like a locked #rules or #songs) may block the bot from posting.
+      else await res.channel.permissionOverwrites.edit(me.id, {
+        ViewChannel: true, SendMessages: true, EmbedLinks: true, ReadMessageHistory: true,
+      });
     }
   }
 

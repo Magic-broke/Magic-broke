@@ -41,7 +41,7 @@ const LAYOUT = [
   { category: 'Welcome', channels: [
     { name: 'rules', mode: READ_ONLY },
     { name: 'introduce-yourself' },
-    { name: 'pick-your-niche', mode: READ_ONLY },
+    { name: 'pick-your-niche', mode: READ_ONLY, needsNiches: true },
   ] },
   { category: 'Campaigns', channels: [
     { name: 'announcements', mode: READ_ONLY },
@@ -103,7 +103,7 @@ async function runSetup(guild) {
 
   for (const section of LAYOUT) {
     const cat = await ensureCategory(guild, section.category);
-    for (const ch of section.channels) {
+    for (const ch of section.channels.filter((c) => !c.needsNiches || config.niches.length)) {
       const res = await ensureText(guild, ch.name, cat.id, ch.mode === READ_ONLY ? readOnly : undefined);
       if (res.created) created.push(`#${ch.name}`);
       // Existing channels (like a locked #rules or #songs) may block the bot from posting.
@@ -114,7 +114,8 @@ async function runSetup(guild) {
   }
 
   // One private channel per niche, visible only to that niche's role.
-  const nicheCat = await ensureCategory(guild, 'Niches');
+  // (Skipped when config.json has no niches.)
+  const nicheCat = config.niches.length && await ensureCategory(guild, 'Niches');
   for (const n of config.niches) {
     const role = guild.roles.cache.find((r) => r.name === n);
     const res = await ensureText(guild, slug(n), nicheCat.id, [
@@ -138,7 +139,7 @@ async function runSetup(guild) {
     }
   };
 
-  await postOnce('pick-your-niche', {
+  if (config.niches.length) await postOnce('pick-your-niche', {
     content: '**Pick your niche(s)** 👇\nClick a button to join that niche and see its channel. Click again to leave.',
     components: nicheButtons(),
   });
@@ -166,6 +167,12 @@ async function runSetup(guild) {
 const modOnly = PermissionFlagsBits.ManageGuild;
 const campaignChoice = (o) => o.setName('song').setDescription('Which song/campaign').setRequired(true).setAutocomplete(true);
 
+// The niche option only shows up when config.json has niches.
+const withNicheOption = (s) => (config.niches.length
+  ? s.addStringOption((o) => o.setName('niche').setDescription('Niche (leave empty for all)')
+    .addChoices(...config.niches.slice(0, 25).map((n) => ({ name: n, value: n }))))
+  : s);
+
 const commands = [
   new SlashCommandBuilder().setName('setup')
     .setDescription('Create the channels, roles and niche picker (safe to run again)')
@@ -173,11 +180,9 @@ const commands = [
 
   new SlashCommandBuilder().setName('campaign').setDescription('Manage song campaigns')
     .setDefaultMemberPermissions(modOnly)
-    .addSubcommand((s) => s.setName('add').setDescription('Start a new song campaign')
+    .addSubcommand((s) => withNicheOption(s.setName('add').setDescription('Start a new song campaign')
       .addStringOption((o) => o.setName('song').setDescription('Song name').setRequired(true))
-      .addStringOption((o) => o.setName('link').setDescription('Link to the sound/song').setRequired(true))
-      .addStringOption((o) => o.setName('niche').setDescription('Niche (leave empty for all)')
-        .addChoices(...config.niches.slice(0, 25).map((n) => ({ name: n, value: n }))))
+      .addStringOption((o) => o.setName('link').setDescription('Link to the sound/song').setRequired(true)))
       .addNumberOption((o) => o.setName('rate').setDescription(`Pay per 1,000 views (default ${config.ratePer1000Views})`).setMinValue(0))
       .addStringOption((o) => o.setName('notes').setDescription('Instructions for creators')))
     .addSubcommand((s) => s.setName('end').setDescription('Stop taking submissions for a song')

@@ -19,10 +19,11 @@ function loadData() {
   try {
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   } catch {
-    return { nextId: 1, campaigns: {}, submissions: [], accounts: {} };
+    return { nextId: 1, campaigns: {}, submissions: [], accounts: {}, paypal: {} };
   }
 }
 const data = loadData();
+data.paypal ||= {};
 function save() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
@@ -126,6 +127,16 @@ async function runSetup(guild) {
     if (res.created) created.push(`#${slug(n)}`);
   }
 
+  // Private channel where every registration (with PayPal email) is logged for the mods.
+  const modRoles = guild.roles.cache.filter((r) => r.id !== everyone.id && !r.managed
+    && (r.permissions.has(PermissionFlagsBits.ManageGuild) || r.permissions.has(PermissionFlagsBits.Administrator)));
+  const regs = await ensureText(guild, 'registrations', null, [
+    { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ...modRoles.map((r) => ({ id: r.id, allow: [PermissionFlagsBits.ViewChannel] })),
+  ]);
+  if (regs.created) created.push('#registrations (private, mods only)');
+
   // Post the niche picker and pay rules, or update the bot's earlier post so it matches
   // config.json. A channel the bot can't post in is reported back instead of failing setup.
   const blocked = [];
@@ -146,16 +157,26 @@ async function runSetup(guild) {
     components: nicheButtons(),
   });
 
-  await postOnce('rules', { embeds: [new EmbedBuilder()
-    .setTitle('How pay works')
-    .setDescription([
-      `• You earn **${money(config.ratePer1000Views)} per 1,000 views** (some songs may pay more; check #songs).`,
-      `• Videos need at least **${config.minViews.toLocaleString()} views** to be paid.`,
-      '• Use `/register` once to add your social accounts.',
-      '• Post each video with `/submit` in #submit-links. One video per submission.',
-      '• Views are counted by the mods, and you can check your total any time with `/earnings`.',
-      '• Only videos from your registered accounts count. Fake views mean a ban.',
-    ].join('\n'))] });
+  await postOnce('rules', { embeds: [
+    new EmbedBuilder()
+      .setTitle('Video rules')
+      .setDescription([
+        '• **The song must be clearly audible for at least 10 seconds** of your video.',
+        '• **Put the song name and artist name in your caption**, every time.',
+        '• **Only post your own original videos.** Reposting someone else\'s video means no pay and a ban.',
+        '• **Keep your videos up.** Deleted or private videos stop earning and are not paid.',
+        '• Only videos from your registered accounts count. Fake or bought views mean a ban.',
+      ].join('\n')),
+    new EmbedBuilder()
+      .setTitle('How pay works')
+      .setDescription([
+        `• You earn **${money(config.ratePer1000Views)} per 1,000 views** (some songs may pay more; check #songs).`,
+        `• Videos need at least **${config.minViews.toLocaleString()} views** to be paid.`,
+        '• **Payouts are sent only by PayPal Goods & Services.** Use `/register` with your TikTok/Instagram handle and your PayPal email to join.',
+        '• Post each video with `/submit` in #submit-links. One video per submission.',
+        '• Views are checked every Thursday. See your total any time with `/earnings`.',
+      ].join('\n')),
+  ] });
 
   // #songs is posted to later by /campaign add, so check it now too.
   const songs = findChannel(guild, 'songs', ChannelType.GuildText);
@@ -193,7 +214,8 @@ const commands = [
   new SlashCommandBuilder().setName('register').setDescription('Add one of your social accounts')
     .addStringOption((o) => o.setName('platform').setDescription('Platform').setRequired(true)
       .addChoices(...['TikTok', 'Instagram'].map((p) => ({ name: p, value: p }))))
-    .addStringOption((o) => o.setName('handle').setDescription('Your @handle').setRequired(true)),
+    .addStringOption((o) => o.setName('handle').setDescription('Your @handle').setRequired(true))
+    .addStringOption((o) => o.setName('paypal').setDescription('Your PayPal Goods & Services email (needed the first time)')),
 
   new SlashCommandBuilder().setName('submit').setDescription('Submit a video you posted')
     .addStringOption(campaignChoice)
@@ -277,11 +299,18 @@ async function handleCommand(i) {
     }
 
     case 'register': {
+      const paypal = i.options.getString('paypal')?.trim().toLowerCase();
+      if (paypal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypal)) return i.reply({ content: 'That PayPal email doesn\'t look right. Please check it and try again.', ephemeral: true });
+      if (!paypal && !data.paypal[i.user.id]) return i.reply({ content: 'Please add your **PayPal Goods & Services email** in the `paypal` box. We only pay through PayPal Goods & Services.', ephemeral: true });
+      if (paypal) data.paypal[i.user.id] = paypal;
       const acc = (data.accounts[i.user.id] ||= {});
       acc[i.options.getString('platform')] = i.options.getString('handle').replace(/^@?/, '@');
       save();
       const list = Object.entries(acc).map(([p, h]) => `${p}: ${h}`).join('\n');
-      return i.reply({ content: `Saved. Your accounts:\n${list}`, ephemeral: true });
+      // Logged in the private #registrations channel; the weekly update copies it to the Sheet.
+      const regs = findChannel(g, 'registrations', ChannelType.GuildText);
+      if (regs) await regs.send({ content: `📝 ${i.user} registered\nPayPal (G&S): ${data.paypal[i.user.id]}\n${list}`, allowedMentions: { parse: [] } });
+      return i.reply({ content: `Saved. Your accounts:\n${list}\nPayPal (G&S): ${data.paypal[i.user.id]}\n\nTo change your PayPal email, run /register again with the new one.`, ephemeral: true });
     }
 
     case 'submit': {
@@ -312,7 +341,8 @@ async function handleCommand(i) {
       const owed = mine.filter((s) => s.status === 'counted').reduce((a, s) => a + s.pay, 0);
       const paid = mine.filter((s) => s.status === 'paid').reduce((a, s) => a + s.pay, 0);
       const lines = mine.slice(-15).map((s) => `#${s.id} ${s.song}: ${s.views == null ? 'waiting for count' : `${s.views.toLocaleString()} views → ${money(s.pay)}`}${s.status === 'paid' ? ' (paid)' : ''}`);
-      return i.reply({ content: `**Owed:** ${money(owed)}  **Paid so far:** ${money(paid)}\n\n${lines.join('\n')}`, ephemeral: true });
+      const pp = data.paypal[i.user.id] ? `PayPal (G&S): ${data.paypal[i.user.id]}` : 'No PayPal email yet: run `/register`.';
+      return i.reply({ content: `**Owed:** ${money(owed)}  **Paid so far:** ${money(paid)}\n${pp}\n\n${lines.join('\n')}`, ephemeral: true });
     }
 
     case 'pending': {
@@ -343,7 +373,7 @@ async function handleCommand(i) {
       const rows = Object.entries(owed).sort((a, b) => b[1] - a[1]);
       if (!rows.length) return i.reply({ content: 'Nobody is owed anything right now.', ephemeral: true });
       const total = rows.reduce((a, [, v]) => a + v, 0);
-      const lines = rows.map(([u, v]) => `<@${u}>: **${money(v)}**`);
+      const lines = rows.map(([u, v]) => `<@${u}>: **${money(v)}** → PayPal G&S: ${data.paypal[u] || '⚠️ no email'}`);
       return i.reply({ content: `**Owed (total ${money(total)}):**\n${lines.join('\n')}\n\nAfter paying someone, run \`/paid user:\``, ephemeral: true });
     }
 

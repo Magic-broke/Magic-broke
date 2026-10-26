@@ -1,4 +1,5 @@
-// Weekly view update: reads every submission the bot posted in #submit-links,
+// Weekly view update: reads every submission the bot posted in #submit-links
+// (and every registration in #registrations, for PayPal emails),
 // gets current view counts from Apify, and works out what to write to the
 // Google Sheet (Videos rows, new Creators, Weekly Log lines).
 //
@@ -7,7 +8,7 @@
 //
 // Usage:
 //   node scripts/weekly-views.js [--videos videos.json] [--creators creators.json] [--out update.json] [--sample]
-//     --videos / --creators: current Sheet rows (Videos!A2:O, Creators!A2:B) as JSON arrays,
+//     --videos / --creators: current Sheet rows (Videos!A2:O, Creators!A2:I) as JSON arrays,
 //                            so existing rows keep their place and "previous week" views.
 //     --sample: use two sample submissions instead of reading Discord (for testing).
 // Needs DISCORD_TOKEN and APIFY_TOKEN environment variables.
@@ -39,15 +40,10 @@ async function discord(path) {
 
 const SUBMISSION = /Submission \*\*#(\d+)\*\* from <@!?(\d+)> for \*\*(.+?)\*\*(?: \(\D*([\d.]+) per 1K views\))?\n(\S+)/;
 
-async function readSubmissions() {
-  const me = await discord('/users/@me');
-  const guilds = await discord('/users/@me/guilds');
-  const guild = guilds.find((g) => g.id === process.env.GUILD_ID) || guilds[0];
-  const channels = await discord(`/guilds/${guild.id}/channels`);
-  const channel = channels.find((c) => c.type === 0 && plain(c.name) === 'submitlinks');
-  if (!channel) throw new Error('No #submit-links channel found. Run /setup in Discord first.');
-  const roles = Object.fromEntries((await discord(`/guilds/${guild.id}/roles`)).map((r) => [r.id, r.name]));
-
+// All messages the bot posted in a channel, oldest first.
+async function botMessages(me, channels, name) {
+  const channel = channels.find((c) => c.type === 0 && plain(c.name) === plain(name));
+  if (!channel) throw new Error(`No #${name} channel found. Run /setup in Discord first.`);
   const messages = [];
   let before = '';
   for (;;) {
@@ -56,6 +52,21 @@ async function readSubmissions() {
     if (page.length < 100) break;
     before = `&before=${page[page.length - 1].id}`;
   }
+  return messages.filter((m) => m.author.id === me.id).reverse();
+}
+
+const REGISTRATION = /<@!?(\d+)> registered\nPayPal \(G&S\): (\S+)/;
+
+async function readDiscord() {
+  const me = await discord('/users/@me');
+  const guilds = await discord('/users/@me/guilds');
+  const guild = guilds.find((g) => g.id === process.env.GUILD_ID) || guilds[0];
+  const channels = await discord(`/guilds/${guild.id}/channels`);
+  const roles = Object.fromEntries((await discord(`/guilds/${guild.id}/roles`)).map((r) => [r.id, r.name]));
+  const messages = await botMessages(me, channels, 'submit-links');
+
+  const names = {};
+  const nameOf = async (userId) => (names[userId] ||= (await discord(`/users/${userId}`).catch(() => ({}))).username || userId);
 
   const niches = {};
   async function nicheOf(userId) {
@@ -69,17 +80,23 @@ async function readSubmissions() {
   }
 
   const subs = [];
-  for (const m of messages.filter((msg) => msg.author.id === me.id).reverse()) {
+  for (const m of messages) {
     const match = m.content.match(SUBMISSION);
     if (!match) continue;
     const [, id, userId, song, rate, link] = match;
-    const user = m.mentions.find((u) => u.id === userId);
     subs.push({
-      id: Number(id), date: m.timestamp.slice(0, 10), creator: user ? user.username : userId,
+      id: Number(id), date: m.timestamp.slice(0, 10), creator: await nameOf(userId),
       niche: await nicheOf(userId), song, link, rate: rate ? Number(rate) : config.ratePer1000Views,
     });
   }
-  return subs;
+
+  // Latest registration per creator: { username: { paypal, niche } }.
+  const registered = {};
+  for (const m of await botMessages(me, channels, 'registrations')) {
+    const match = m.content.match(REGISTRATION);
+    if (match) registered[await nameOf(match[1])] = { paypal: match[2], niche: await nicheOf(match[1]) };
+  }
+  return { subs, registered };
 }
 
 const SAMPLE = [
@@ -136,9 +153,11 @@ async function fetchViews(links) {
 // ---------- build the Sheet update ----------
 
 async function main() {
-  const subs = args.includes('--sample') ? SAMPLE : await readSubmissions();
+  const { subs, registered } = args.includes('--sample')
+    ? { subs: SAMPLE, registered: { 'sample-creator-1': { paypal: 'sample1@example.com', niche: 'Corecore' } } }
+    : await readDiscord();
   const oldVideos = readJson(arg('videos'), []).filter((r) => r && r[0] !== undefined && r[0] !== '');
-  const oldCreators = readJson(arg('creators'), []).filter((r) => r && r[0]);
+  const oldCreators = readJson(arg('creators'), []).filter((r) => r && r[0]); // Creators!A2:I
 
   const views = subs.length ? await fetchViews(subs.map((s) => s.link)) : {};
 
@@ -173,18 +192,25 @@ async function main() {
   }
   for (const r of rows) { r[10] = null; r[12] = null; }
 
-  // Creators: keep existing names (and what you typed in other columns), add anyone new.
-  const creators = oldCreators.map((r) => [r[0], r[1] ?? '']);
+  // Creators: keep existing names, add anyone new (registered or with a video).
+  // Writes A (name), B (niche) and I (PayPal); C-H are null so formulas and "Paid to date" stay.
+  const creators = oldCreators.map((r) => [r[0], r[1] ?? '', null, null, null, null, null, null, r[8] ?? '']);
+  const creator = (name) => creators.find((r) => r[0] === name)
+    || creators[creators.push([name, '', null, null, null, null, null, null, '']) - 1];
+  for (const [name, reg] of Object.entries(registered)) {
+    const c = creator(name);
+    c[8] = reg.paypal;
+    if (reg.niche) c[1] = reg.niche;
+  }
   for (const s of subs) {
-    const c = creators.find((r) => r[0] === s.creator);
-    if (!c) creators.push([s.creator, s.niche]);
-    else if (s.niche) c[1] = s.niche;
+    const c = creator(s.creator);
+    if (s.niche) c[1] = s.niche;
   }
 
   const update = {
     date: today,
     videos: rows.length ? { range: `Videos!A2:O${rows.length + 1}`, values: rows } : null,
-    creators: creators.length ? { range: `Creators!A2:B${creators.length + 1}`, values: creators } : null,
+    creators: creators.length ? { range: `Creators!A2:I${creators.length + 1}`, values: creators } : null,
     log: log.length ? { range: "'Weekly Log'!A:F", values: log } : null,
     summary: `${subs.length} submissions found, views updated for ${subs.length - failed}, couldn't read ${failed}. `
       + `Total views: ${rows.reduce((a, r) => a + (Number(r[8]) || 0), 0).toLocaleString()}.`,

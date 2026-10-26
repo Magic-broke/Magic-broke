@@ -109,7 +109,7 @@ async function runSetup(guild) {
       // Existing channels (like a locked #rules or #songs) may block the bot from posting.
       else await res.channel.permissionOverwrites.edit(me.id, {
         ViewChannel: true, SendMessages: true, EmbedLinks: true, ReadMessageHistory: true,
-      });
+      }).catch(() => {});
     }
   }
 
@@ -125,33 +125,40 @@ async function runSetup(guild) {
     if (res.created) created.push(`#${slug(n)}`);
   }
 
-  // Post the niche picker (once).
-  const picker = findChannel(guild, 'pick-your-niche', ChannelType.GuildText);
-  const recent = await picker.messages.fetch({ limit: 20 });
-  if (!recent.some((m) => m.author.id === me.id)) {
-    await picker.send({
-      content: '**Pick your niche(s)** 👇\nClick a button to join that niche and see its channel. Click again to leave.',
-      components: nicheButtons(),
-    });
-  }
+  // Post the niche picker and pay rules (once each). A channel the bot can't post in
+  // is reported back instead of failing the whole setup.
+  const blocked = [];
+  const postOnce = async (name, message) => {
+    const ch = findChannel(guild, name, ChannelType.GuildText);
+    try {
+      const recent = await ch.messages.fetch({ limit: 20 });
+      if (!recent.some((m) => m.author.id === me.id)) await ch.send(message);
+    } catch {
+      blocked.push(ch);
+    }
+  };
 
-  // Post the pay rules (once).
-  const rules = findChannel(guild, 'rules', ChannelType.GuildText);
-  const rulesMsgs = await rules.messages.fetch({ limit: 20 });
-  if (!rulesMsgs.some((m) => m.author.id === me.id)) {
-    await rules.send({ embeds: [new EmbedBuilder()
-      .setTitle('How pay works')
-      .setDescription([
-        `• You earn **${money(config.ratePer1000Views)} per 1,000 views** (some songs may pay more; check #songs).`,
-        `• Videos need at least **${config.minViews.toLocaleString()} views** to be paid.`,
-        '• Use `/register` once to add your social accounts.',
-        '• Post each video with `/submit` in #submit-links. One video per submission.',
-        '• Views are counted by the mods, and you can check your total any time with `/earnings`.',
-        '• Only videos from your registered accounts count. Fake views mean a ban.',
-      ].join('\n'))] });
-  }
+  await postOnce('pick-your-niche', {
+    content: '**Pick your niche(s)** 👇\nClick a button to join that niche and see its channel. Click again to leave.',
+    components: nicheButtons(),
+  });
 
-  return created;
+  await postOnce('rules', { embeds: [new EmbedBuilder()
+    .setTitle('How pay works')
+    .setDescription([
+      `• You earn **${money(config.ratePer1000Views)} per 1,000 views** (some songs may pay more; check #songs).`,
+      `• Videos need at least **${config.minViews.toLocaleString()} views** to be paid.`,
+      '• Use `/register` once to add your social accounts.',
+      '• Post each video with `/submit` in #submit-links. One video per submission.',
+      '• Views are counted by the mods, and you can check your total any time with `/earnings`.',
+      '• Only videos from your registered accounts count. Fake views mean a ban.',
+    ].join('\n'))] });
+
+  // #songs is posted to later by /campaign add, so check it now too.
+  const songs = findChannel(guild, 'songs', ChannelType.GuildText);
+  if (!songs.permissionsFor(me).has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) blocked.push(songs);
+
+  return { created, blocked };
 }
 
 // ---------- slash commands ----------
@@ -218,10 +225,15 @@ async function handleCommand(i) {
   switch (i.commandName) {
     case 'setup': {
       await i.deferReply({ ephemeral: true });
-      const created = await runSetup(g);
-      return i.editReply(created.length
+      const { created, blocked } = await runSetup(g);
+      const lines = [created.length
         ? `Done! Created: ${created.join(', ')}.\nExisting channels were left alone.`
-        : 'Everything was already set up. Nothing changed.');
+        : 'Everything was already set up. Nothing changed.'];
+      if (blocked.length) {
+        lines.push(`\n⚠️ I'm not allowed to post in ${blocked.join(', ')}. In each one: Edit Channel → Permissions → `
+          + `add **${g.members.me.displayName}** → turn on **Send Messages** and **Embed Links** → Save. Then run /setup again.`);
+      }
+      return i.editReply(lines.join('\n'));
     }
 
     case 'campaign': {
@@ -392,4 +404,5 @@ if (!process.env.DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is not set.');
   process.exit(1);
 }
-client.login(process.env.DISCORD_TOKEN);
+if (require.main === module) client.login(process.env.DISCORD_TOKEN);
+module.exports = { client, runSetup };

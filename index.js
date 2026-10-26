@@ -126,14 +126,16 @@ async function runSetup(guild) {
     if (res.created) created.push(`#${slug(n)}`);
   }
 
-  // Post the niche picker and pay rules (once each). A channel the bot can't post in
-  // is reported back instead of failing the whole setup.
+  // Post the niche picker and pay rules, or update the bot's earlier post so it matches
+  // config.json. A channel the bot can't post in is reported back instead of failing setup.
   const blocked = [];
   const postOnce = async (name, message) => {
     const ch = findChannel(guild, name, ChannelType.GuildText);
     try {
       const recent = await ch.messages.fetch({ limit: 20 });
-      if (!recent.some((m) => m.author.id === me.id)) await ch.send(message);
+      const mine = recent.find((m) => m.author.id === me.id);
+      if (mine) await mine.edit(message);
+      else await ch.send(message);
     } catch {
       blocked.push(ch);
     }

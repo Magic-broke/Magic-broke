@@ -10,7 +10,8 @@ const {
 } = require('discord.js');
 
 const config = require('./config.json');
-const DATA_FILE = path.join(__dirname, 'data.json');
+// On a host like Railway, set DATA_DIR to a mounted volume so data survives restarts.
+const DATA_FILE = path.join(process.env.DATA_DIR || __dirname, 'data.json');
 
 // ---------- storage ----------
 
@@ -173,7 +174,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('register').setDescription('Add one of your social accounts')
     .addStringOption((o) => o.setName('platform').setDescription('Platform').setRequired(true)
-      .addChoices(...['TikTok', 'YouTube', 'Instagram', 'X'].map((p) => ({ name: p, value: p }))))
+      .addChoices(...['TikTok', 'Instagram'].map((p) => ({ name: p, value: p }))))
     .addStringOption((o) => o.setName('handle').setDescription('Your @handle').setRequired(true)),
 
   new SlashCommandBuilder().setName('submit').setDescription('Submit a video you posted')
@@ -200,7 +201,7 @@ const commands = [
 
 // ---------- handlers ----------
 
-const VIDEO_SITES = /(tiktok\.com|youtube\.com|youtu\.be|instagram\.com|x\.com|twitter\.com)/i;
+const VIDEO_SITES = /(tiktok\.com|instagram\.com)/i;
 
 function campaignsFor(guildId) {
   return (data.campaigns[guildId] ||= {});
@@ -265,7 +266,7 @@ async function handleCommand(i) {
       const link = i.options.getString('link').trim();
       const c = campaigns[song];
       if (!c || !c.active) return i.reply({ content: 'That campaign is not active. Check #songs.', ephemeral: true });
-      if (!VIDEO_SITES.test(link)) return i.reply({ content: 'Please submit a TikTok, YouTube, Instagram or X link.', ephemeral: true });
+      if (!VIDEO_SITES.test(link)) return i.reply({ content: 'Please submit a TikTok or Instagram link.', ephemeral: true });
       if (data.submissions.some((s) => s.link === link)) return i.reply({ content: 'That video has already been submitted.', ephemeral: true });
       if (!data.accounts[i.user.id]) return i.reply({ content: 'Please `/register` your social account first.', ephemeral: true });
       const sub = {
@@ -274,7 +275,12 @@ async function handleCommand(i) {
       };
       data.submissions.push(sub);
       save();
-      return i.reply(`✅ Submission **#${sub.id}** from ${i.user} for **${song}**\n${link}`);
+      // Always posted in #submit-links: the weekly view update reads submissions from there.
+      const text = `✅ Submission **#${sub.id}** from ${i.user} for **${song}** (${money(c.rate)} per 1K views)\n${link}`;
+      const submitCh = findChannel(g, 'submit-links', ChannelType.GuildText);
+      if (!submitCh || submitCh.id === i.channelId) return i.reply(text);
+      await submitCh.send(text);
+      return i.reply({ content: `Got it! Your video is logged in ${submitCh} as **#${sub.id}**.`, ephemeral: true });
     }
 
     case 'earnings': {
@@ -350,7 +356,7 @@ async function handleNicheButton(i) {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   for (const guild of client.guilds.cache.values()) {
     await guild.commands.set(commands);

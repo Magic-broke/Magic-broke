@@ -15,6 +15,7 @@ In a Claude Code cloud session (traffic goes through a proxy), start it with
 ## First use
 
 In Discord, an admin runs `/setup` once. Niches, pay rate and minimum views are in `config.json`.
+Creators submit with `/submit`; every submission is posted in #submit-links.
 
 | Command | Who | What it does |
 |---|---|---|
@@ -27,3 +28,13 @@ In Discord, an admin runs `/setup` once. Niches, pay rate and minimum views are 
 | `/views` | Mods | Record views for a submission (calculates pay) |
 | `/payouts` | Mods | Who is owed what |
 | `/paid` | Mods | Mark a creator as paid |
+
+## Weekly view counts
+
+Every Thursday, `scripts/weekly-views.js` reads the submissions in #submit-links, gets view
+counts from Apify (`APIFY_TOKEN`) and updates the Google Sheet. See [WEEKLY.md](WEEKLY.md).
+
+## Hosting (Railway)
+
+Set `DISCORD_TOKEN` in the service variables. Add a volume mounted at `/data` and set
+`DATA_DIR=/data` so campaigns, accounts and submissions survive restarts.

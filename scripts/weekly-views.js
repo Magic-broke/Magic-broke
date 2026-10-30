@@ -8,7 +8,7 @@
 //
 // Usage:
 //   node scripts/weekly-views.js [--videos videos.json] [--creators creators.json] [--out update.json] [--sample]
-//     --videos / --creators: current Sheet rows (Videos!A2:O, Creators!A2:I) as JSON arrays,
+//     --videos / --creators: current Sheet rows (Videos!A2:O, Creators!A2:J) as JSON arrays,
 //                            so existing rows keep their place and "previous week" views.
 //     --sample: use two sample submissions instead of reading Discord (for testing).
 // Needs DISCORD_TOKEN and APIFY_TOKEN environment variables.
@@ -55,7 +55,8 @@ async function botMessages(me, channels, name) {
   return messages.filter((m) => m.author.id === me.id).reverse();
 }
 
-const REGISTRATION = /<@!?(\d+)> registered\nPayPal \(G&S\): (\S+)/;
+// "📝 <@id> registered\nPayPal (G&S): email\nTikTok: handle\nProfile: link" (Profile added later; optional)
+const REGISTRATION = /<@!?(\d+)> registered\nPayPal \(G&S\): (\S+)\n(?:(TikTok|Instagram): @?(\S+))?(?:\nProfile: (\S+))?/;
 
 async function readDiscord() {
   const me = await discord('/users/@me');
@@ -90,11 +91,16 @@ async function readDiscord() {
     });
   }
 
-  // Latest registration per creator: { username: { paypal, niche } }.
+  // Latest registration per creator: { username: { paypal, niche, profile, handles: { TikTok: 'name' } } }.
   const registered = {};
   for (const m of await botMessages(me, channels, 'registrations')) {
     const match = m.content.match(REGISTRATION);
-    if (match) registered[await nameOf(match[1])] = { paypal: match[2], niche: await nicheOf(match[1]) };
+    if (!match) continue;
+    const [, userId, paypal, platform, handle, profile] = match;
+    const name = await nameOf(userId);
+    const prev = registered[name] || { handles: {} };
+    registered[name] = { paypal, niche: await nicheOf(userId), profile: profile || prev.profile || '', handles: prev.handles };
+    if (platform) registered[name].handles[platform] = handle.toLowerCase();
   }
   return { subs, registered };
 }
@@ -154,7 +160,7 @@ async function fetchViews(links) {
 
 async function main() {
   const { subs, registered } = args.includes('--sample')
-    ? { subs: SAMPLE, registered: { 'sample-creator-1': { paypal: 'sample1@example.com', niche: 'Corecore' } } }
+    ? { subs: SAMPLE, registered: { 'sample-creator-1': { paypal: 'sample1@example.com', niche: '', profile: 'https://www.tiktok.com/@tiktok', handles: { TikTok: 'tiktok' } } } }
     : await readDiscord();
   const oldVideos = readJson(arg('videos'), []).filter((r) => r && r[0] !== undefined && r[0] !== '');
   const oldCreators = readJson(arg('creators'), []).filter((r) => r && r[0]); // Creators!A2:I
@@ -188,18 +194,25 @@ async function main() {
     row[3] = v.handle;
     row[13] = today;
     if (String(row[14]).startsWith('⚠')) row[14] = '';
+    // Flag videos posted by a different account than the one the creator registered.
+    const mine = registered[row[2]]?.handles[row[4]];
+    if (mine && v.handle.replace(/^@/, '').toLowerCase() !== mine && !row[14]) {
+      row[14] = `⚠ Posted by ${v.handle}, but registered as @${mine}`;
+    }
     log.push([today, s.id, row[2], row[4], s.link, v.views]);
   }
   for (const r of rows) { r[10] = null; r[12] = null; }
 
   // Creators: keep existing names, add anyone new (registered or with a video).
-  // Writes A (name), B (niche) and I (PayPal); C-H are null so formulas and "Paid to date" stay.
-  const creators = oldCreators.map((r) => [r[0], r[1] ?? '', null, null, null, null, null, null, r[8] ?? '']);
+  // Writes A (name), B (niche), I (PayPal) and J (profile link); C-H are null so formulas
+  // and "Paid to date" stay.
+  const creators = oldCreators.map((r) => [r[0], r[1] ?? '', null, null, null, null, null, null, r[8] ?? '', r[9] ?? '']);
   const creator = (name) => creators.find((r) => r[0] === name)
-    || creators[creators.push([name, '', null, null, null, null, null, null, '']) - 1];
+    || creators[creators.push([name, '', null, null, null, null, null, null, '', '']) - 1];
   for (const [name, reg] of Object.entries(registered)) {
     const c = creator(name);
     c[8] = reg.paypal;
+    if (reg.profile) c[9] = reg.profile;
     if (reg.niche) c[1] = reg.niche;
   }
   for (const s of subs) {
@@ -210,7 +223,7 @@ async function main() {
   const update = {
     date: today,
     videos: rows.length ? { range: `Videos!A2:O${rows.length + 1}`, values: rows } : null,
-    creators: creators.length ? { range: `Creators!A2:I${creators.length + 1}`, values: creators } : null,
+    creators: creators.length ? { range: `Creators!A2:J${creators.length + 1}`, values: creators } : null,
     log: log.length ? { range: "'Weekly Log'!A:F", values: log } : null,
     summary: `${subs.length} submissions found, views updated for ${subs.length - failed}, couldn't read ${failed}. `
       + `Total views: ${rows.reduce((a, r) => a + (Number(r[8]) || 0), 0).toLocaleString()}.`,

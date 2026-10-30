@@ -15,14 +15,15 @@ In a Claude Code cloud session (traffic goes through a proxy), start it with
 ## First use
 
 In Discord, an admin runs `/setup` once. Niches, pay rate and minimum views are in `config.json`.
-Creators submit with `/submit`; every submission is posted in #submit-links.
+Creators click the button in #register (or type `/register` / `/submit`) to open a form: handle, PayPal
+Goods & Services email, profile link, video link and sound. Every submission is posted in #submit-links;
+new or changed details (with the PayPal email) go to the private #registrations channel.
 
 | Command | Who | What it does |
 |---|---|---|
 | `/setup` | Admin | Creates missing channels/roles and the niche picker |
 | `/campaign add` / `end` | Mods | Start or close a song campaign (posts in #songs) |
-| `/register` | Creators | Save a social account |
-| `/submit` | Creators | Submit a video link for a song |
+| `/register` / `/submit` | Creators | Open the registration & video form |
 | `/earnings` | Creators | See your views, owed and paid amounts |
 | `/pending` | Mods | Videos waiting for a view count |
 | `/views` | Mods | Record views for a submission (calculates pay) |

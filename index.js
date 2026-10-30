@@ -7,6 +7,7 @@ const path = require('path');
 const {
   Client, GatewayIntentBits, ChannelType, PermissionFlagsBits,
   SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 
 const config = require('./config.json');
@@ -19,11 +20,12 @@ function loadData() {
   try {
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   } catch {
-    return { nextId: 1, campaigns: {}, submissions: [], accounts: {}, paypal: {} };
+    return { nextId: 1, campaigns: {}, submissions: [], accounts: {}, paypal: {}, profiles: {} };
   }
 }
 const data = loadData();
 data.paypal ||= {};
+data.profiles ||= {};
 function save() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
@@ -47,6 +49,7 @@ const LAYOUT = [
   { category: 'Campaigns', channels: [
     { name: 'announcements', mode: READ_ONLY },
     { name: 'songs', mode: READ_ONLY },
+    { name: 'register', mode: READ_ONLY },
     { name: 'submit-links' },
     { name: 'general-chat' },
   ] },
@@ -157,6 +160,16 @@ async function runSetup(guild) {
     components: nicheButtons(),
   });
 
+  await postOnce('register', {
+    content: [
+      '**Register & submit a video** 📝',
+      'Posted a video with one of our sounds? Click the button and fill out the form, once for **every** video.',
+      'You\'ll need: your handle (without the @), your PayPal Goods & Services email, your profile link, the video link and the sound you used.',
+    ].join('\n'),
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('form:open').setLabel('Register & submit a video').setStyle(ButtonStyle.Primary).setEmoji('📝'))],
+  });
+
   await postOnce('rules', { embeds: [
     new EmbedBuilder()
       .setTitle('Video rules')
@@ -172,8 +185,8 @@ async function runSetup(guild) {
       .setDescription([
         `• You earn **${money(config.ratePer1000Views)} per 1,000 views** (some songs may pay more; check #songs).`,
         `• Videos need at least **${config.minViews.toLocaleString()} views** to be paid.`,
-        '• **Payouts are sent only by PayPal Goods & Services.** Use `/register` with your TikTok/Instagram handle and your PayPal email to join.',
-        '• Post each video with `/submit` in #submit-links. One video per submission.',
+        '• **Payouts are sent only by PayPal Goods & Services**, to the email you give in the form.',
+        '• Fill out the form in #register (or type `/submit`) for every video you post. One video per form.',
         '• Views are checked every Thursday. See your total any time with `/earnings`.',
       ].join('\n')),
   ] });
@@ -211,15 +224,9 @@ const commands = [
     .addSubcommand((s) => s.setName('end').setDescription('Stop taking submissions for a song')
       .addStringOption(campaignChoice)),
 
-  new SlashCommandBuilder().setName('register').setDescription('Add one of your social accounts')
-    .addStringOption((o) => o.setName('platform').setDescription('Platform').setRequired(true)
-      .addChoices(...['TikTok', 'Instagram'].map((p) => ({ name: p, value: p }))))
-    .addStringOption((o) => o.setName('handle').setDescription('Your @handle').setRequired(true))
-    .addStringOption((o) => o.setName('paypal').setDescription('Your PayPal Goods & Services email (needed the first time)')),
+  new SlashCommandBuilder().setName('register').setDescription('Register and submit a video (opens a form)'),
 
-  new SlashCommandBuilder().setName('submit').setDescription('Submit a video you posted')
-    .addStringOption(campaignChoice)
-    .addStringOption((o) => o.setName('link').setDescription('Link to your video').setRequired(true)),
+  new SlashCommandBuilder().setName('submit').setDescription('Submit a video you posted (opens a form)'),
 
   new SlashCommandBuilder().setName('earnings').setDescription('See your submissions and earnings'),
 
@@ -240,8 +247,6 @@ const commands = [
 ].map((c) => c.toJSON());
 
 // ---------- handlers ----------
-
-const VIDEO_SITES = /(tiktok\.com|instagram\.com)/i;
 
 function campaignsFor(guildId) {
   return (data.campaigns[guildId] ||= {});
@@ -298,50 +303,17 @@ async function handleCommand(i) {
       return i.reply({ content: `Campaign **${song}** is live${songsCh ? ' and posted in #songs' : ''}.`, ephemeral: true });
     }
 
-    case 'register': {
-      const paypal = i.options.getString('paypal')?.trim().toLowerCase();
-      if (paypal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypal)) return i.reply({ content: 'That PayPal email doesn\'t look right. Please check it and try again.', ephemeral: true });
-      if (!paypal && !data.paypal[i.user.id]) return i.reply({ content: 'Please add your **PayPal Goods & Services email** in the `paypal` box. We only pay through PayPal Goods & Services.', ephemeral: true });
-      if (paypal) data.paypal[i.user.id] = paypal;
-      const acc = (data.accounts[i.user.id] ||= {});
-      acc[i.options.getString('platform')] = i.options.getString('handle').replace(/^@?/, '@');
-      save();
-      const list = Object.entries(acc).map(([p, h]) => `${p}: ${h}`).join('\n');
-      // Logged in the private #registrations channel; the weekly update copies it to the Sheet.
-      const regs = findChannel(g, 'registrations', ChannelType.GuildText);
-      if (regs) await regs.send({ content: `📝 ${i.user} registered\nPayPal (G&S): ${data.paypal[i.user.id]}\n${list}`, allowedMentions: { parse: [] } });
-      return i.reply({ content: `Saved. Your accounts:\n${list}\nPayPal (G&S): ${data.paypal[i.user.id]}\n\nTo change your PayPal email, run /register again with the new one.`, ephemeral: true });
-    }
-
-    case 'submit': {
-      const song = i.options.getString('song');
-      const link = i.options.getString('link').trim();
-      const c = campaigns[song];
-      if (!c || !c.active) return i.reply({ content: 'That campaign is not active. Check #songs.', ephemeral: true });
-      if (!VIDEO_SITES.test(link)) return i.reply({ content: 'Please submit a TikTok or Instagram link.', ephemeral: true });
-      if (data.submissions.some((s) => s.link === link)) return i.reply({ content: 'That video has already been submitted.', ephemeral: true });
-      if (!data.accounts[i.user.id]) return i.reply({ content: 'Please `/register` your social account first.', ephemeral: true });
-      const sub = {
-        id: data.nextId++, guildId: g.id, userId: i.user.id, song, link,
-        views: null, pay: 0, status: 'pending', date: new Date().toISOString(),
-      };
-      data.submissions.push(sub);
-      save();
-      // Always posted in #submit-links: the weekly view update reads submissions from there.
-      const text = `✅ Submission **#${sub.id}** from ${i.user} for **${song}** (${money(c.rate)} per 1K views)\n${link}`;
-      const submitCh = findChannel(g, 'submit-links', ChannelType.GuildText);
-      if (!submitCh || submitCh.id === i.channelId) return i.reply(text);
-      await submitCh.send(text);
-      return i.reply({ content: `Got it! Your video is logged in ${submitCh} as **#${sub.id}**.`, ephemeral: true });
-    }
+    case 'register':
+    case 'submit':
+      return i.showModal(videoForm(i.user.id));
 
     case 'earnings': {
       const mine = data.submissions.filter((s) => s.guildId === g.id && s.userId === i.user.id);
-      if (!mine.length) return i.reply({ content: 'No submissions yet. Use `/submit` to add one.', ephemeral: true });
+      if (!mine.length) return i.reply({ content: 'No submissions yet. Fill out the form in #register (or type `/submit`) to add one.', ephemeral: true });
       const owed = mine.filter((s) => s.status === 'counted').reduce((a, s) => a + s.pay, 0);
       const paid = mine.filter((s) => s.status === 'paid').reduce((a, s) => a + s.pay, 0);
       const lines = mine.slice(-15).map((s) => `#${s.id} ${s.song}: ${s.views == null ? 'waiting for count' : `${s.views.toLocaleString()} views → ${money(s.pay)}`}${s.status === 'paid' ? ' (paid)' : ''}`);
-      const pp = data.paypal[i.user.id] ? `PayPal (G&S): ${data.paypal[i.user.id]}` : 'No PayPal email yet: run `/register`.';
+      const pp = data.paypal[i.user.id] ? `PayPal (G&S): ${data.paypal[i.user.id]}` : 'No PayPal email yet: fill out the form in #register.';
       return i.reply({ content: `**Owed:** ${money(owed)}  **Paid so far:** ${money(paid)}\n${pp}\n\n${lines.join('\n')}`, ephemeral: true });
     }
 
@@ -392,6 +364,82 @@ async function handleCommand(i) {
   }
 }
 
+// ---------- registration / submission form ----------
+
+const platformOf = (link) => (/tiktok\.com/i.test(link) ? 'TikTok' : /instagram\.com/i.test(link) ? 'Instagram' : null);
+
+function videoForm(userId) {
+  const acc = data.accounts[userId] || {};
+  const platform = Object.keys(acc).pop();
+  const field = (id, label, placeholder, value) => {
+    const input = new TextInputBuilder().setCustomId(id).setLabel(label).setPlaceholder(placeholder)
+      .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(200);
+    if (value) input.setValue(value);
+    return new ActionRowBuilder().addComponents(input);
+  };
+  return new ModalBuilder().setCustomId('form:video').setTitle('Register & submit a video').addComponents(
+    field('handle', 'Your handle (without the @)', 'yourname', platform && acc[platform]),
+    field('paypal', 'PayPal Goods & Services email', 'you@example.com', data.paypal[userId]),
+    field('profile', 'Your TikTok or Instagram profile link', 'https://www.tiktok.com/@yourname', platform && data.profiles[userId]?.[platform]),
+    field('video', 'Link to the video', 'https://www.tiktok.com/@yourname/video/...', ''),
+    field('sound', 'Sound used (song name and artist)', 'Song Name - Artist', ''),
+  );
+}
+
+async function handleVideoForm(i) {
+  const g = i.guild;
+  const get = (id) => i.fields.getTextInputValue(id).trim();
+  const handle = get('handle').replace(/^@+/, '');
+  const paypal = get('paypal').toLowerCase();
+  const profile = get('profile');
+  const link = get('video');
+  const sound = get('sound');
+  const platform = platformOf(profile);
+
+  const problem = !/^[\w.]{1,30}$/.test(handle) ? 'Your handle should be just the name, with no @ or spaces (for example `yourname`).'
+    : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypal) ? 'That PayPal email doesn\'t look right.'
+      : !platform ? 'Your profile link must be a TikTok or Instagram link.'
+        : platformOf(link) !== platform ? `Your video link must be a ${platform} link, like your profile.`
+          : data.submissions.some((s) => s.link === link) ? 'That video has already been submitted.'
+            : null;
+  if (problem) return i.reply({ content: `${problem} Please click the button and try again.`, ephemeral: true });
+
+  // Save the creator's details, and log them privately in #registrations when new or changed.
+  const acc = (data.accounts[i.user.id] ||= {});
+  const profiles = (data.profiles[i.user.id] ||= {});
+  const changed = acc[platform] !== handle || profiles[platform] !== profile || data.paypal[i.user.id] !== paypal;
+  acc[platform] = handle;
+  profiles[platform] = profile;
+  data.paypal[i.user.id] = paypal;
+
+  // Use the campaign's rate when the sound matches a song from /campaign add.
+  const c = Object.values(campaignsFor(g.id)).find((x) => plain(x.song) === plain(sound));
+  const rate = c?.rate ?? config.ratePer1000Views;
+  const sub = {
+    id: data.nextId++, guildId: g.id, userId: i.user.id, song: c?.song || sound, link,
+    views: null, pay: 0, status: 'pending', date: new Date().toISOString(),
+  };
+  data.submissions.push(sub);
+  save();
+
+  if (changed) {
+    const regs = findChannel(g, 'registrations', ChannelType.GuildText);
+    if (regs) {
+      await regs.send({
+        content: `📝 ${i.user} registered\nPayPal (G&S): ${paypal}\n${platform}: ${handle}\nProfile: ${profile}`,
+        allowedMentions: { parse: [] },
+      });
+    }
+  }
+  // Always posted in #submit-links: the weekly view update reads submissions from there.
+  const submitCh = findChannel(g, 'submit-links', ChannelType.GuildText);
+  if (submitCh) await submitCh.send(`✅ Submission **#${sub.id}** from ${i.user} for **${sub.song}** (${money(rate)} per 1K views)\n${link}`);
+  return i.reply({
+    content: `✅ Got it! Your video is logged as **#${sub.id}**${submitCh ? ` in ${submitCh}` : ''}. Views are checked every Thursday; see your total with \`/earnings\`.`,
+    ephemeral: true,
+  });
+}
+
 async function handleNicheButton(i) {
   const name = i.customId.slice('niche:'.length);
   const role = i.guild.roles.cache.find((r) => r.name === name);
@@ -429,6 +477,8 @@ client.on('interactionCreate', async (i) => {
       return i.respond(names);
     }
     if (i.isButton() && i.customId.startsWith('niche:')) return await handleNicheButton(i);
+    if (i.isButton() && i.customId === 'form:open') return await i.showModal(videoForm(i.user.id));
+    if (i.isModalSubmit() && i.customId === 'form:video') return await handleVideoForm(i);
     if (i.isChatInputCommand()) return await handleCommand(i);
   } catch (err) {
     console.error(err);
